@@ -1,0 +1,14 @@
+FROM python:alpine
+
+RUN apk add --no-cache ca-certificates
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+# Copy the rest of the application code
+COPY . .
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0"]
