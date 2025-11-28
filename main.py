@@ -5,14 +5,23 @@ from sqlalchemy.orm import Session
 
 from db import SessionLocal, engine
 from models import Base, Lead, Source, SourceOperator, Operator, Contact
-from schemas import OperatorCreate, OperatorOut, LeadCreate, LeadOut
+from schemas import (
+    ContactCreate,
+    ContactOut,
+    OperatorCreate,
+    OperatorOut,
+    LeadCreate,
+    LeadOut,
+)
 
+# Create all tables in the database
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
 
 def get_db():
+    """Provide a database session to endpoints and close it after use."""
     db = SessionLocal()
     try:
         yield db
@@ -22,27 +31,30 @@ def get_db():
 
 @app.get("/")
 def root():
+    """Simple health check endpoint."""
     return {"status": "ok"}
 
 
 def assign_operator_for_source(db: Session, source_name: str) -> Operator | None:
     """
-    Вернуть выбранного оператора или None, если никого нет.
-    Алгоритм: получить пары (operator, weight) для source, фильтровать active and workload < limit,
-    затем weighted random by weight.
+    Return a selected operator or None if none are available.
+    Algorithm:
+    1. Fetch (operator, weight) pairs for the source.
+    2. Filter only active operators whose workload is less than their limit.
+    3. Pick one operator randomly based on weight.
     """
     source = db.scalar(select(Source).where(Source.name == source_name))
     if not source:
         return None
 
-    # join source_operators -> operator
+    # Join SourceOperator -> Operator
     rows = db.execute(
         select(SourceOperator, Operator)
         .join(Operator, SourceOperator.operator_id == Operator.id)
         .where(SourceOperator.source_id == source.id)
     ).all()
 
-    # собрать только eligible
+    # Keep only eligible operators
     choices = []
     for so, op in rows:
         if op.active and (op.workload < op.limit):
@@ -52,6 +64,7 @@ def assign_operator_for_source(db: Session, source_name: str) -> Operator | None
     if not choices:
         return None
 
+    # Weighted random selection
     total = sum(w for _, w in choices)
     r = random.uniform(0, total)
     upto = 0.0
@@ -59,11 +72,12 @@ def assign_operator_for_source(db: Session, source_name: str) -> Operator | None
         upto += w
         if r <= upto:
             return op
-    return choices[-1][0]
+    return choices[-1][0]  # fallback to last operator
 
 
 @app.post("/operators", response_model=OperatorOut)
 def create_operator(op: OperatorCreate, db: Session = Depends(get_db)):
+    """Create a new operator with given name and workload limit."""
     new_op = Operator(name=op.name, limit=op.limit, workload=0)
     db.add(new_op)
     db.commit()
@@ -73,13 +87,17 @@ def create_operator(op: OperatorCreate, db: Session = Depends(get_db)):
 
 @app.get("/operators", response_model=list[OperatorOut])
 def list_operators(db: Session = Depends(get_db)):
+    """List all operators."""
     return db.query(Operator).all()
 
 
 def find_or_create_lead(
     db: Session, external_id: str | None, phone: str | None, email: str | None
 ) -> Lead:
-    # поиск по внешнему id -> телефону -> почте
+    """
+    Find an existing lead by external_id, phone, or email.
+    If none found, create a new Lead.
+    """
     if external_id:
         lead = db.scalar(select(Lead).where(Lead.external_id == external_id))
         if lead:
@@ -92,7 +110,8 @@ def find_or_create_lead(
         lead = db.scalar(select(Lead).where(Lead.email == email))
         if lead:
             return lead
-    # если не найден — создаём
+
+    # If no existing lead found, create a new one
     new = Lead(external_id=external_id, phone=phone, email=email)
     db.add(new)
     db.commit()
@@ -102,8 +121,9 @@ def find_or_create_lead(
 
 def assign_lead_simple(db: Session, lead: Lead) -> None:
     """
-    Minimal assignment: pick the first eligible operator (workload < limit).
-    Replace this with weighted logic later.
+    Minimal lead assignment: pick the first eligible operator
+    (whose workload < limit).
+    Replace this with weighted assignment logic later.
     """
     op = (
         db.query(Operator)
@@ -112,9 +132,11 @@ def assign_lead_simple(db: Session, lead: Lead) -> None:
         .first()
     )
     if not op:
-        return  # Nothing available; leave unassigned
+        return  # No available operator, leave unassigned
+
+    # Assign operator and increment workload
     lead.assigned_to = op.id
-    op.workload = op.workload + 1
+    op.workload += 1
     db.add(op)
     db.add(lead)
     db.commit()
@@ -123,12 +145,16 @@ def assign_lead_simple(db: Session, lead: Lead) -> None:
 
 @app.post("/leads", response_model=LeadOut)
 def create_lead(l_in: LeadCreate, db: Session = Depends(get_db)):
+    """
+    Create a new lead from input data.
+    Automatically assign operator using simple assignment logic.
+    """
     new_lead = Lead(source=l_in.source)
     db.add(new_lead)
     db.commit()
     db.refresh(new_lead)
 
-    # try automatic assignment (simple). Swap with weighted function when ready.
+    # Try automatic assignment (replace with weighted logic later)
     assign_lead_simple(db, new_lead)
 
     return new_lead
@@ -136,27 +162,31 @@ def create_lead(l_in: LeadCreate, db: Session = Depends(get_db)):
 
 @app.get("/leads", response_model=list[LeadOut])
 def list_leads(db: Session = Depends(get_db)):
+    """List all leads, ordered by creation date descending."""
     return db.query(Lead).order_by(Lead.created_at.desc()).all()
 
 
-@app.post("/contacts")
-def create_contact(payload: dict, db: Session = Depends(get_db)):
+@app.post("/contacts", response_model=ContactOut)
+def create_contact(payload: ContactCreate, db: Session = Depends(get_db)):
     """
-    payload example:
+    Create a new contact (interaction from a source).
+    Example payload:
     {
       "source": "telegram_bot_1",
       "external_id": "ext-123",   # optional
       "phone": "+7700...",        # optional
-      "email": "a@b.com"         # optional
+      "email": "a@b.com"          # optional
     }
     """
-    src_name = payload["source"]
-    external_id = payload.get("external_id")
-    phone = payload.get("phone")
-    email = payload.get("email")
+    src_name = payload.source
+    external_id = payload.external_id
+    phone = payload.phone
+    email = payload.email
 
+    # Find or create the lead
     lead = find_or_create_lead(db, external_id, phone, email)
-    # ensure source exists
+
+    # Ensure source exists
     source = db.scalar(select(Source).where(Source.name == src_name))
     if not source:
         source = Source(name=src_name)
@@ -164,19 +194,21 @@ def create_contact(payload: dict, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(source)
 
-    # попытка назначить оператора
-    # В идеале надо делать это в транзакции и брать lock на строку оператора (SELECT ... FOR UPDATE)
-    # Пример ниже упрощённый; для production используйте row-level locks или отдельный счетчик в БД.
+    # Attempt to assign an operator
+    # Note: In production, wrap in a transaction and consider row-level locks (SELECT ... FOR UPDATE)
     op = assign_operator_for_source(db, src_name)
 
+    # Create contact entry
     contact = Contact(
         lead_id=lead.id, source_id=source.id, assigned_to=(op.id if op else None)
     )
     db.add(contact)
+
     if op:
-        # увеличить нагрузку оператора
-        op.workload = op.workload + 1
+        # Increment operator workload
+        op.workload += 1
         db.add(op)
+
     db.commit()
     db.refresh(contact)
     return {"contact_id": contact.id, "assigned_to": (op.id if op else None)}

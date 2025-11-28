@@ -28,3 +28,15 @@ class LeadOut(BaseModel):
     assigned_to: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ContactCreate(BaseModel):
+    source: str
+    external_id: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+
+
+class ContactOut(BaseModel):
+    contact_id: int
+    assigned_to: Optional[int] = None
