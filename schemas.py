@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional
 from datetime import datetime
 
@@ -14,8 +14,7 @@ class OperatorOut(BaseModel):
     limit: int
     workload: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class LeadCreate(BaseModel):
@@ -28,5 +27,4 @@ class LeadOut(BaseModel):
     created_at: datetime
     assigned_to: Optional[int] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
